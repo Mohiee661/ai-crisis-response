@@ -560,8 +560,46 @@ def run_live_graph(
                     send_alert(action, camera_id=camera_id, details=result["action_output"]["message"])
 
             if display:
+                display_frame = frame.copy()
+
+                # ── Immediate red overlay on fall (uses raw live_event, not stable) ──
+                if live_event.get("fall_detected", False):
+                    red_overlay = display_frame.copy()
+                    red_overlay[:] = (0, 0, 200)          # solid red
+                    cv2.addWeighted(red_overlay, 0.30, display_frame, 0.70, 0, display_frame)
+
+                    # Bold "FALL DETECTED" banner at top
+                    h_frame = display_frame.shape[0]
+                    banner_h = max(50, h_frame // 10)
+                    cv2.rectangle(display_frame, (0, 0), (display_frame.shape[1], banner_h), (0, 0, 180), -1)
+                    cv2.putText(
+                        display_frame,
+                        "⚠  FALL DETECTED — ALERT AMBULANCE",
+                        (20, banner_h - 12),
+                        cv2.FONT_HERSHEY_DUPLEX,
+                        0.9,
+                        (255, 255, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+                # ── Fire/smoke alert banner ──
+                elif stable_event.get("fire", False) and stable_event.get("validation_state") == "ALERT":
+                    banner_h = max(50, display_frame.shape[0] // 10)
+                    cv2.rectangle(display_frame, (0, 0), (display_frame.shape[1], banner_h), (0, 60, 200), -1)
+                    cv2.putText(
+                        display_frame,
+                        "🔥  FIRE ALERT — DISPATCHING FIRE STATION",
+                        (20, banner_h - 12),
+                        cv2.FONT_HERSHEY_DUPLEX,
+                        0.9,
+                        (255, 255, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
                 cv2.namedWindow("AI Crisis Response Graph", cv2.WINDOW_NORMAL)
-                cv2.imshow("AI Crisis Response Graph", frame)
+                cv2.imshow("AI Crisis Response Graph", display_frame)
                 if cv2.waitKey(30) == 27:
                     break
 
