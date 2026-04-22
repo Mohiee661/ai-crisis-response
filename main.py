@@ -5,19 +5,20 @@ from typing import TypedDict
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langgraph.graph import StateGraph
+from langgraph.graph import StateGraph, START, END
 
 
 history = []
 
 
 class State(TypedDict, total=False):
-    vision: dict
+    vision_event: dict
+    crisis: str
     social: dict
-    fusion: dict
-    risk: dict
-    decision: dict
-    action: dict
+    fusion_output: dict
+    risk_output: dict
+    decision_output: dict
+    action_output: dict
     history: list
 
 
@@ -49,14 +50,14 @@ llm = create_llm()
 
 
 def fusion_agent(state: State) -> State:
-    if "vision" not in state or "social" not in state:
+    if "vision_event" not in state or "social" not in state:
         raise ValueError(f"Missing input data: {state}")
 
     prompt = f"""
 You are a crisis validation AI.
 
 Vision system detected:
-{state["vision"]}
+{state["vision_event"]}
 
 Social signals:
 {state["social"]}
@@ -70,13 +71,13 @@ Return only valid JSON:
 """
 
     response = llm.invoke(prompt)
-    state["fusion"] = safe_parse(response.content)
+    state["fusion_output"] = safe_parse(response.content)
     state["history"] = history
     history.append(
         {
-            "vision": state["vision"],
+            "vision": state["vision_event"],
             "social": state["social"],
-            "fusion": state["fusion"],
+            "fusion": state["fusion_output"],
         }
     )
     return state
@@ -87,7 +88,7 @@ def risk_agent(state: State) -> State:
 You are a risk assessment AI.
 
 Current event:
-{state["fusion"]}
+{state["fusion_output"]}
 
 Previous events:
 {state.get("history", [])}
@@ -105,12 +106,12 @@ Return only valid JSON:
 """
 
     response = llm.invoke(prompt)
-    state["risk"] = safe_parse(response.content)
+    state["risk_output"] = safe_parse(response.content)
     return state
 
 
 def decision_agent(state: State) -> State:
-    crisis_type = state["vision"]["crisis"]
+    crisis_type = state["crisis"]
 
     prompt = f"""
 You are an emergency decision system.
@@ -119,7 +120,7 @@ Crisis type:
 {crisis_type}
 
 Risk:
-{state["risk"]}
+{state["risk_output"]}
 
 Rules:
 - FIRE or GAS LEAK means EVACUATE.
@@ -134,7 +135,7 @@ Return only valid JSON:
 """
 
     response = llm.invoke(prompt)
-    state["decision"] = safe_parse(response.content)
+    state["decision_output"] = safe_parse(response.content)
     return state
 
 
@@ -143,7 +144,7 @@ def action_agent(state: State) -> State:
 You are an emergency execution system.
 
 Input:
-{state["decision"]}
+{state["decision_output"]}
 
 Return only valid JSON:
 {{
@@ -153,20 +154,21 @@ Return only valid JSON:
 """
 
     response = llm.invoke(prompt)
-    state["action"] = safe_parse(response.content)
+    state["action_output"] = safe_parse(response.content)
     return state
 
 
 def build_graph():
     graph = StateGraph(State)
-    graph.add_node("fusion", fusion_agent)
-    graph.add_node("risk", risk_agent)
-    graph.add_node("decision", decision_agent)
-    graph.add_node("action", action_agent)
-    graph.set_entry_point("fusion")
-    graph.add_edge("fusion", "risk")
-    graph.add_edge("risk", "decision")
-    graph.add_edge("decision", "action")
+    graph.add_node("fusion_node", fusion_agent)
+    graph.add_node("risk_node", risk_agent)
+    graph.add_node("decision_node", decision_agent)
+    graph.add_node("action_node", action_agent)
+    graph.set_entry_point("fusion_node")
+    graph.add_edge("fusion_node", "risk_node")
+    graph.add_edge("risk_node", "decision_node")
+    graph.add_edge("decision_node", "action_node")
+    graph.add_edge("action_node", END)
     return graph.compile()
 
 
@@ -177,15 +179,14 @@ def prioritize(events: list[State]) -> list[State]:
         "IGNORE": 1,
     }
     crisis_weight = {
-        "fire": 3,
-        "gas leak": 3,
-        "person collapse": 2,
-        "medical emergency": 2,
+        "FIRE": 3,
+        "GAS LEAK": 3,
+        "MEDICAL": 2,
     }
 
     def score(event: State) -> int:
-        decision_score = priority_score.get(event["decision"]["decision"], 0)
-        crisis_score = crisis_weight.get(event["vision"]["crisis"], 1)
+        decision_score = priority_score.get(event["decision_output"]["decision"], 0)
+        crisis_score = crisis_weight.get(event["crisis"], 1)
         return decision_score + crisis_score
 
     return sorted(events, key=score, reverse=True)
@@ -193,12 +194,16 @@ def prioritize(events: list[State]) -> list[State]:
 
 def run_demo() -> None:
     app = build_graph()
+    
+    # Mock vision events matching the new structure
     events = [
         {
-            "vision": {
-                "crisis": "fire",
+            "vision_event": {
+                "fire": True,
+                "smoke": False,
+                "person": False,
+                "fall_detected": False,
                 "confidence": 0.9,
-                "location": "camera_1",
             },
             "social": {
                 "crisis": "fire",
@@ -207,10 +212,12 @@ def run_demo() -> None:
             },
         },
         {
-            "vision": {
-                "crisis": "person collapse",
+            "vision_event": {
+                "fire": False,
+                "smoke": False,
+                "person": True,
+                "fall_detected": True,
                 "confidence": 0.85,
-                "location": "camera_2",
             },
             "social": {
                 "crisis": "medical emergency",
@@ -221,15 +228,23 @@ def run_demo() -> None:
     ]
 
     results = []
-    for index, event in enumerate(events, start=1):
+    for index, raw_event in enumerate(events, start=1):
         print(f"\n--- EVENT {index} ---\n")
-        result = app.invoke(event)
+        
+        # Inject dynamic crisis label
+        from vision_agent import event_to_crisis
+        raw_event["crisis"] = event_to_crisis(raw_event["vision_event"])
+        
+        result = app.invoke(raw_event)
         results.append(result)
         print(result)
 
     print("\n--- PRIORITIZED RESPONSE ---\n")
     for event in prioritize(results):
-        print(event["vision"]["crisis"], "->", event["decision"]["decision"], "|", event["action"]["tool"])
+        crisis = event.get("crisis", "UNKNOWN")
+        decision = event.get("decision_output", {}).get("decision", "NO_DECISION")
+        tool = event.get("action_output", {}).get("tool", "NO_TOOL")
+        print(f"{crisis} -> {decision} | {tool}")
 
 
 if __name__ == "__main__":

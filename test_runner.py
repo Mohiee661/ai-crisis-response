@@ -12,27 +12,13 @@ STABILITY_FRAMES = 3
 WINDOW_NAME = "AI Crisis Response"
 
 
-def update_stability_counter(active: bool, current_count: int) -> int:
-    if active:
-        return current_count + 1
-    return 0
-
-
-def apply_temporal_stability(event: dict, fire_frames: int, fall_frames: int) -> dict:
-    stable_event = event.copy()
-    stable_event["fire"] = event["fire"] and fire_frames >= STABILITY_FRAMES
-    stable_event["smoke"] = event["smoke"] and fire_frames >= STABILITY_FRAMES
-    stable_event["fall_detected"] = event["fall_detected"] and fall_frames >= STABILITY_FRAMES
-    return stable_event
-
-
 def run_pipeline(video_path: str) -> None:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Unable to open video source: {video_path}")
 
-    fire_frames = 0
-    fall_frames = 0
+    fire_count = 0
+    fall_count = 0
     last_action = "NO_ACTION"
 
     try:
@@ -41,24 +27,37 @@ def run_pipeline(video_path: str) -> None:
             if not ret:
                 break
 
+            # 1. Vision Detection
             event = vision_agent.process_frame(frame)
-            fire_frames = update_stability_counter(event["fire"] or event["smoke"], fire_frames)
-            fall_frames = update_stability_counter(event["fall_detected"], fall_frames)
-            stable_event = apply_temporal_stability(event, fire_frames, fall_frames)
-
+            
+            # 2. Temporal Stability (Smoothed)
+            fire_count = max(0, fire_count + 1 if (event["fire"] or event["smoke"]) else fire_count - 1)
+            fall_count = max(0, fall_count + 1 if event["fall_detected"] else fall_count - 1)
+            
+            fire_confirmed = fire_count >= STABILITY_FRAMES
+            fall_confirmed = fall_count >= STABILITY_FRAMES
+            
+            # Create stable event for decision
+            stable_event = event.copy()
+            stable_event["fire"] = fire_confirmed
+            stable_event["fall_detected"] = fall_confirmed
+            
+            # 3. Decision Logic
+            crisis = vision_agent.event_to_crisis(stable_event)
             danger = detect_danger(stable_event)
             action = decision_engine(danger)
 
-            print(f"[VISION] {stable_event}")
-            print(f"[DANGER] {danger}")
+            # 4. Clean Logging
+            print(f"[VISION EVENT] {event}")
+            print(f"[CRISIS] {crisis}")
             print(f"[ACTION] {action}")
 
+            # 5. Alert Triggering
             if action != "NO_ACTION" and action != last_action:
                 send_alert(action)
             last_action = action
 
             cv2.imshow(WINDOW_NAME, frame)
-
             if cv2.waitKey(1) == 27:
                 break
     finally:

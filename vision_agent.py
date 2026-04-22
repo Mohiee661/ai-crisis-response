@@ -22,13 +22,41 @@ FALL_COLOR = (0, 0, 255)
 WINDOW_NAME = "Vision Agent"
 
 
-def load_models() -> tuple[YOLO, YOLO]:
-    fire_detector = YOLO(FIRE_MODEL_PATH)
-    person_detector = YOLO(PERSON_MODEL_PATH)
-    return fire_detector, person_detector
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+
+def _load_model(path: str) -> YOLO:
+    try:
+        return YOLO(path)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load model '{path}': {exc}") from exc
 
 
-fire_model, person_model = load_models()
+fire_model = _load_model(FIRE_MODEL_PATH)
+person_model = _load_model(PERSON_MODEL_PATH)
+
+# ---------------------------------------------------------------------------
+# Dynamic class mapping — no hardcoded IDs
+# ---------------------------------------------------------------------------
+
+class_names: dict[int, str] = fire_model.model.names
+print(f"[MODEL CLASSES] {class_names}")
+
+fire_classes: list[int] = [cid for cid, name in class_names.items() if "fire" in name.lower()]
+smoke_classes: list[int] = [cid for cid, name in class_names.items() if "smoke" in name.lower()]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def event_to_crisis(event: dict) -> str:
+    if event["fire"] or event["smoke"]:
+        return "FIRE"
+    if event["fall_detected"]:
+        return "MEDICAL"
+    return "SAFE"
 
 
 def create_empty_event() -> dict:
@@ -38,7 +66,6 @@ def create_empty_event() -> dict:
         "person": False,
         "fall_detected": False,
         "confidence": 0.0,
-        "_person_boxes": [],
     }
 
 
@@ -62,52 +89,38 @@ def draw_box(frame, box_coordinates, label: str, color: tuple[int, int, int]) ->
     )
 
 
-def rectangle_iou(first_box: tuple[int, int, int, int], second_box: tuple[int, int, int, int]) -> float:
+def rectangle_iou(
+    first_box: tuple[int, int, int, int],
+    second_box: tuple[int, int, int, int],
+) -> float:
     ax1, ay1, ax2, ay2 = first_box
     bx1, by1, bx2, by2 = second_box
 
-    intersection_x1 = max(ax1, bx1)
-    intersection_y1 = max(ay1, by1)
-    intersection_x2 = min(ax2, bx2)
-    intersection_y2 = min(ay2, by2)
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
 
-    intersection_area = max(0, intersection_x2 - intersection_x1) * max(0, intersection_y2 - intersection_y1)
-    first_area = max(0, ax2 - ax1) * max(0, ay2 - ay1)
-    second_area = max(0, bx2 - bx1) * max(0, by2 - by1)
-    union_area = first_area + second_area - intersection_area
+    intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union = area_a + area_b - intersection
 
-    if union_area == 0:
-        return 0.0
-    return intersection_area / union_area
+    return intersection / union if union > 0 else 0.0
 
 
-def overlaps_person(box_coordinates: tuple[int, int, int, int], event: dict) -> bool:
-    return any(rectangle_iou(box_coordinates, person_box) > 0.10 for person_box in event["_person_boxes"])
+def overlaps_person(box_coordinates: tuple[int, int, int, int], person_boxes: list) -> bool:
+    return any(
+        rectangle_iou(box_coordinates, person_box) > 0.10
+        for person_box in person_boxes
+    )
 
 
-def get_class_name(model: YOLO, class_id: int) -> str:
-    names = getattr(model, "names", {})
-    if isinstance(names, dict):
-        return str(names.get(class_id, class_id)).lower()
-    if isinstance(names, list) and 0 <= class_id < len(names):
-        return str(names[class_id]).lower()
-    return str(class_id)
+# ---------------------------------------------------------------------------
+# Detection — fire / smoke
+# ---------------------------------------------------------------------------
 
-
-def classify_fire_event(class_id: int, class_name: str) -> str | None:
-    if class_name in {"fire", "flame", "flames"}:
-        return "fire"
-    if class_name in {"smoke", "smoky"}:
-        return "smoke"
-    if class_name == str(class_id):
-        if class_id == 0:
-            return "fire"
-        if class_id == 1:
-            return "smoke"
-    return None
-
-
-def detect_fire_and_smoke(frame, event: dict) -> None:
+def detect_fire_and_smoke(frame, event: dict) -> float:
     results = fire_model.predict(
         frame,
         conf=FIRE_CONFIDENCE_THRESHOLD,
@@ -115,29 +128,34 @@ def detect_fire_and_smoke(frame, event: dict) -> None:
         verbose=False,
     )
 
+    max_conf = 0.0
     for result in results:
         for box in result.boxes:
-            class_id = int(box.cls[0])
-            confidence = float(box.conf[0])
-            coordinates = box.xyxy[0]
-            class_name = get_class_name(fire_model, class_id)
-            event_type = classify_fire_event(class_id, class_name)
+            cls = int(box.cls[0])
+            conf = float(box.conf[0])
+            coords = box.xyxy[0]
 
-            if event_type is None:
-                continue
-            if confidence <= FIRE_CONFIDENCE_THRESHOLD or box_area(coordinates) < MIN_BOX_AREA:
+            if conf <= FIRE_CONFIDENCE_THRESHOLD or box_area(coords) < MIN_BOX_AREA:
                 continue
 
-            event[event_type] = True
-            event["confidence"] = max(event["confidence"], confidence)
+            max_conf = max(max_conf, conf)
+            if cls in fire_classes:
+                event["fire"] = True
+                draw_box(frame, coords, f"fire {conf:.2f}", FIRE_COLOR)
 
-            color = FIRE_COLOR if event_type == "fire" else SMOKE_COLOR
-            label = f"{event_type} {confidence:.2f}"
-            draw_box(frame, coordinates, label, color)
+            elif cls in smoke_classes:
+                event["smoke"] = True
+                draw_box(frame, coords, f"smoke {conf:.2f}", SMOKE_COLOR)
+    
+    return max_conf
 
 
-def detect_visual_fire(frame, event: dict) -> None:
-    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+# ---------------------------------------------------------------------------
+# Detection — visual flame fallback (only when model finds nothing)
+# ---------------------------------------------------------------------------
+
+def detect_visual_fire(frame, person_boxes: list) -> float:
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
     lower_orange = np.array([0, 130, 170])
     upper_orange = np.array([35, 255, 255])
@@ -145,24 +163,22 @@ def detect_visual_fire(frame, event: dict) -> None:
     upper_red = np.array([179, 255, 255])
 
     warm_mask = cv2.bitwise_or(
-        cv2.inRange(hsv_frame, lower_orange, upper_orange),
-        cv2.inRange(hsv_frame, lower_red, upper_red),
+        cv2.inRange(hsv, lower_orange, upper_orange),
+        cv2.inRange(hsv, lower_red, upper_red),
     )
 
-    blue_channel, green_channel, red_channel = cv2.split(frame)
-    dominance_mask = (
-        (red_channel > green_channel * 0.95)
-        & (red_channel > blue_channel * 1.15)
-        & (red_channel > 120)
+    b, g, r = cv2.split(frame)
+    dominance = (
+        (r > g * 0.95) & (r > b * 1.15) & (r > 120)
     ).astype(np.uint8) * 255
 
-    fire_mask = cv2.bitwise_and(warm_mask, dominance_mask)
+    fire_mask = cv2.bitwise_and(warm_mask, dominance)
     fire_mask = cv2.morphologyEx(fire_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     fire_mask = cv2.dilate(fire_mask, np.ones((5, 5), np.uint8), iterations=1)
 
     contours, _ = cv2.findContours(fire_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    total_fire_area = sum(cv2.contourArea(contour) for contour in contours)
-    if total_fire_area < MIN_VISUAL_FIRE_AREA or total_fire_area > MAX_VISUAL_FIRE_AREA:
+    total_area = sum(cv2.contourArea(c) for c in contours)
+    if total_area < MIN_VISUAL_FIRE_AREA or total_area > MAX_VISUAL_FIRE_AREA:
         return
 
     for contour in contours:
@@ -170,18 +186,22 @@ def detect_visual_fire(frame, event: dict) -> None:
         if area < MIN_VISUAL_FIRE_AREA:
             continue
 
-        x, y, width, height = cv2.boundingRect(contour)
-        box_coordinates = (x, y, x + width, y + height)
-        if overlaps_person(box_coordinates, event):
+        x, y, w, h = cv2.boundingRect(contour)
+        coords = (x, y, x + w, y + h)
+        if overlaps_person(coords, person_boxes):
             continue
 
-        confidence = min(0.95, 0.35 + (area / max(1, frame.shape[0] * frame.shape[1])) * 12)
-        event["fire"] = True
-        event["confidence"] = max(event["confidence"], confidence)
-        draw_box(frame, box_coordinates, f"fire {confidence:.2f}", FIRE_COLOR)
+        conf = min(0.95, 0.35 + (area / max(1, frame.shape[0] * frame.shape[1])) * 12)
+        draw_box(frame, coords, f"fire(fallback) {conf:.2f}", FIRE_COLOR)
+        return conf
+    return 0.0
 
 
-def detect_person_and_fall(frame, event: dict) -> None:
+# ---------------------------------------------------------------------------
+# Detection — person / fall
+# ---------------------------------------------------------------------------
+
+def detect_person_and_fall(frame, event: dict) -> tuple[float, list]:
     results = person_model.predict(
         frame,
         classes=[PERSON_CLASS_ID],
@@ -190,43 +210,63 @@ def detect_person_and_fall(frame, event: dict) -> None:
         verbose=False,
     )
 
+    max_conf = 0.0
+    person_boxes = []
     for result in results:
         for box in result.boxes:
-            confidence = float(box.conf[0])
+            conf = float(box.conf[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            width = x2 - x1
-            height = y2 - y1
-            area = width * height
+            w = x2 - x1
+            h = y2 - y1
 
-            if confidence <= PERSON_CONFIDENCE_THRESHOLD or area < MIN_BOX_AREA:
+            if conf <= PERSON_CONFIDENCE_THRESHOLD or w * h < MIN_BOX_AREA:
                 continue
 
+            max_conf = max(max_conf, conf)
             event["person"] = True
-            event["confidence"] = max(event["confidence"], confidence)
-            event["_person_boxes"].append((x1, y1, x2, y2))
+            person_boxes.append((x1, y1, x2, y2))
 
-            is_fall_posture = width > height
-            if is_fall_posture:
+            is_fall = w > h
+            if is_fall:
                 event["fall_detected"] = True
 
-            label_name = "fall" if is_fall_posture else "person"
-            color = FALL_COLOR if is_fall_posture else PERSON_COLOR
-            draw_box(frame, (x1, y1, x2, y2), f"{label_name} {confidence:.2f}", color)
+            label = "fall" if is_fall else "person"
+            color = FALL_COLOR if is_fall else PERSON_COLOR
+            draw_box(frame, (x1, y1, x2, y2), f"{label} {conf:.2f}", color)
+    
+    return max_conf, person_boxes
 
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def process_frame(frame) -> dict:
     event = create_empty_event()
-    detect_person_and_fall(frame, event)
-    detect_fire_and_smoke(frame, event)
-    if not event["fire"] and not event["smoke"]:
-        detect_visual_fire(frame, event)
-    event.pop("_person_boxes", None)
+    
+    p_conf, person_boxes = detect_person_and_fall(frame, event)
+    f_conf = detect_fire_and_smoke(frame, event)
+    
+    # Fallback only when the model found no fire
+    if not event["fire"]:
+        fb_conf = detect_visual_fire(frame, person_boxes)
+        if fb_conf > 0:
+            event["fire"] = True
+            f_conf = max(f_conf, fb_conf)
+    
+    event["confidence"] = max(p_conf, f_conf)
+    
+    print(f"[VISION EVENT] {event}")
     return event
 
 
-def vision_agent(frame) -> dict:
-    return process_frame(frame)
+# Alias kept for any code that imports vision_agent directly
+vision_agent = process_frame
 
+
+# ---------------------------------------------------------------------------
+# Standalone runner
+# ---------------------------------------------------------------------------
 
 def run_video(video_path: str = DEFAULT_VIDEO_PATH) -> None:
     cap = cv2.VideoCapture(video_path)
@@ -238,10 +278,8 @@ def run_video(video_path: str = DEFAULT_VIDEO_PATH) -> None:
             ret, frame = cap.read()
             if not ret:
                 break
-
-            event = process_frame(frame)
+            process_frame(frame)
             cv2.imshow(WINDOW_NAME, frame)
-
             if cv2.waitKey(1) == 27:
                 break
     finally:
