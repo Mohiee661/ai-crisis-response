@@ -31,7 +31,8 @@ SMOKE_CLASS_ID = get_env_int("SMOKE_CLASS_ID", 1)
 
 FIRE_CONFIDENCE_THRESHOLD = get_env_float("FIRE_THRESHOLD", 0.75)
 SMOKE_CONFIDENCE_THRESHOLD = get_env_float("SMOKE_THRESHOLD", 0.60)
-PERSON_CONFIDENCE_THRESHOLD = 0.30
+PERSON_CONFIDENCE_THRESHOLD = get_env_float("PERSON_THRESHOLD", 0.55)
+PERSON_MIN_BOX_AREA = get_env_int("PERSON_MIN_BOX_AREA", 3000)
 MIN_BOX_AREA = get_env_int("MIN_BOX_AREA", 500)
 MIN_FIRE_BOX_AREA = get_env_int("FIRE_MIN_BOX_AREA", 250)
 MAX_FIRE_BOX_AREA = get_env_int("FIRE_MAX_BOX_AREA", 2000)
@@ -252,6 +253,24 @@ def is_fire_color(frame, coords) -> bool:
     fire_ratio = np.sum(fire_pixels) / (roi.shape[0] * roi.shape[1] + 1e-6)
     return fire_ratio > 0.01
 
+def is_smoke_color(frame, coords) -> bool:
+    """Smoke should appear as grayish, low-saturation, and dark.
+    Reject bright/uniform-colored regions like plain walls."""
+    x1, y1, x2, y2 = map(int, coords)
+    roi = frame[y1:y2, x1:x2]
+    if roi.size == 0:
+        return False
+    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    sat = hsv_roi[:, :, 1]  # saturation channel
+    val = hsv_roi[:, :, 2]  # brightness channel
+    # Real smoke: low saturation (grayish), not overly bright (not white wall)
+    low_sat_pixels = np.sum(sat < 60)
+    total_pixels = roi.shape[0] * roi.shape[1] + 1e-6
+    low_sat_ratio = low_sat_pixels / total_pixels
+    mean_brightness = float(np.mean(val))
+    # Accept if >40% of pixels are grayish AND not a pure bright white wall
+    return low_sat_ratio > 0.40 and mean_brightness < 220
+
 
 def compute_roi_motion(frame_gray, prev_gray, coords) -> float:
     x1, y1, x2, y2 = map(int, coords)
@@ -304,7 +323,15 @@ def detect_fire_and_smoke(frame, event: VisionEvent, camera_id: str) -> float:
                     continue
                 if w * h < MIN_BOX_AREA:
                     continue
-                    
+                # Motion check: static walls won't move
+                if prev_gray is not None:
+                    motion = compute_roi_motion(frame_gray, prev_gray, coords)
+                    if motion < MOTION_THRESHOLD:
+                        continue
+                # Color check: real smoke is gray/dark, not a bright uniform wall
+                if not is_smoke_color(frame, coords):
+                    continue
+
                 max_smoke_confidence = max(max_smoke_confidence, conf)
                 event["smoke"] = True
                 draw_box(frame, coords, f"smoke {conf:.2f}", SMOKE_COLOR)
@@ -335,14 +362,24 @@ def detect_person_and_fall(frame, event: VisionEvent) -> tuple[float, list]:
             w = x2 - x1
             h = y2 - y1
 
-            if conf <= PERSON_CONFIDENCE_THRESHOLD or w * h < MIN_BOX_AREA:
+            # Strict filters to remove non-human detections
+            if conf < PERSON_CONFIDENCE_THRESHOLD:
+                continue
+            # Must be large enough to be a real person
+            if w * h < PERSON_MIN_BOX_AREA:
+                continue
+            # Aspect ratio: persons are taller than wide (except when fallen)
+            # Allow up to 2.5:1 width-to-height only (very wide boxes = non-person)
+            aspect = w / (h + 1e-6)
+            if aspect > 2.5:
                 continue
 
             max_conf = max(max_conf, conf)
             event["person"] = True
             person_boxes.append((x1, y1, x2, y2))
 
-            is_fall = w > h
+            # Fall: person lying down — width > height but within reason
+            is_fall = 1.2 < aspect <= 2.5
             if is_fall:
                 event["fall_detected"] = True
 
