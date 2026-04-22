@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -541,23 +542,38 @@ def run_live_graph(
 
             if tracker.should_invoke_graph(camera_id, attention_state):
                 result = app.invoke(build_initial_state(stable_event))
-                log_payload(
-                    logger,
-                    logging.INFO,
-                    "graph_result",
-                    {
-                        "camera_id": camera_id,
-                        "frame_index": frame_index,
-                        "fusion_output": result["fusion_output"],
-                        "risk_output": result["risk_output"],
-                        "decision_output": result["decision_output"],
-                        "action_output": result["action_output"],
-                    },
-                )
+                graph_data = {
+                    "camera_id": camera_id,
+                    "frame_index": frame_index,
+                    "fusion_output": result["fusion_output"],
+                    "risk_output": result["risk_output"],
+                    "decision_output": result["decision_output"],
+                    "action_output": result["action_output"],
+                }
+                log_payload(logger, logging.INFO, "graph_result", graph_data)
+                
+                # Push to API logs
+                api_server.update_state({
+                    "logs": api_server.latest_state["logs"] + [
+                        f"[Fusion] {result['fusion_output']['crisis_type']}",
+                        f"[Risk] {result['risk_output']['severity']}",
+                        f"[Decision] {result['action_output']['action']}"
+                    ]
+                })
 
                 action = result["action_output"]["action"]
                 if tracker.should_send_alert(camera_id, action):
                     send_alert(action, camera_id=camera_id, details=result["action_output"]["message"])
+                    # Push to API alerts
+                    new_alert = {
+                        "type": "FIRE" if "FIRE" in action else "FALL",
+                        "severity": result["risk_output"]["severity"],
+                        "camera_id": camera_id,
+                        "timestamp": datetime.now().strftime("%H:%M:%S")
+                    }
+                    api_server.update_state({
+                        "alerts": [new_alert] + api_server.latest_state["alerts"]
+                    })
 
             if display:
                 display_frame = frame.copy()

@@ -2,9 +2,18 @@ import base64
 import threading
 import cv2
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 state_lock = threading.Lock()
 latest_state = {
@@ -31,7 +40,7 @@ def get_status():
 
 def start_server():
     def run():
-        uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
     
     t = threading.Thread(target=run, daemon=True)
     t.start()
