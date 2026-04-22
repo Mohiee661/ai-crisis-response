@@ -1,18 +1,15 @@
-import os
 import json
+import os
 import re
+from typing import TypedDict
+
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph
-from typing import TypedDict
 
-
-# ----------- MEMORY -----------
 
 history = []
 
-
-# ----------- STATE -----------
 
 class State(TypedDict, total=False):
     vision: dict
@@ -24,54 +21,49 @@ class State(TypedDict, total=False):
     history: list
 
 
-# ----------- SETUP -----------
-
-load_dotenv()
-
-llm = ChatGroq(
-    temperature=0,
-    model="llama-3.1-8b-instant"
-)
-
-
-# ----------- SAFE PARSE -----------
-
-def safe_parse(text):
+def safe_parse(text: str) -> dict:
     try:
         return json.loads(text)
-    except:
-        try:
-            json_str = re.search(r"{.*}", text, re.DOTALL).group()
-            return json.loads(json_str)
-        except:
-            return {"raw": text}
+    except json.JSONDecodeError:
+        match = re.search(r"{.*}", text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+    return {"raw": text}
 
 
-# ----------- FUSION AGENT -----------
+def create_llm() -> ChatGroq:
+    load_dotenv()
+    if not os.getenv("GROQ_API_KEY"):
+        raise RuntimeError("GROQ_API_KEY is missing. Copy .env.example to .env and set your key.")
 
-def fusion_agent(state):
+    return ChatGroq(
+        temperature=0,
+        model="llama-3.1-8b-instant",
+    )
+
+
+llm = create_llm()
+
+
+def fusion_agent(state: State) -> State:
     if "vision" not in state or "social" not in state:
         raise ValueError(f"Missing input data: {state}")
-
-    data = state
 
     prompt = f"""
 You are a crisis validation AI.
 
 Vision system detected:
-{data['vision']}
+{state["vision"]}
 
 Social signals:
-{data['social']}
+{state["social"]}
 
-STRICT RULES:
-
-* Return ONLY valid JSON
-* No explanation
-
-Format:
+Return only valid JSON:
 {{
-    "is_crisis": true/false,
+    "is_crisis": true,
     "confidence": "LOW/MEDIUM/HIGH",
     "reason": "short reason"
 }}
@@ -79,59 +71,45 @@ Format:
 
     response = llm.invoke(prompt)
     state["fusion"] = safe_parse(response.content)
-
-    # Add memory
     state["history"] = history
-    history.append({
-        "vision": data["vision"],
-        "social": data["social"],
-        "fusion": state["fusion"]
-    })
-
+    history.append(
+        {
+            "vision": state["vision"],
+            "social": state["social"],
+            "fusion": state["fusion"],
+        }
+    )
     return state
 
 
-# ----------- RISK AGENT -----------
-
-# ----------- RISK AGENT -----------
-
-def risk_agent(state):
-    fusion_output = state["fusion"]
-
+def risk_agent(state: State) -> State:
     prompt = f"""
 You are a risk assessment AI.
 
 Current event:
-{fusion_output}
+{state["fusion"]}
 
 Previous events:
 {state.get("history", [])}
 
-RULES:
-- If multiple similar events → increase severity
-- If repeated high confidence → CRITICAL
+Rules:
+- If multiple similar events occur, increase severity.
+- If repeated high-confidence events occur, mark CRITICAL.
 
-STRICT RULES:
-- Return ONLY valid JSON
-- No explanation
-- No markdown
-- No text before or after JSON
-
-Format:
+Return only valid JSON:
 {{
-  "severity": "LOW/MEDIUM/HIGH/CRITICAL",
-  "urgency": "MONITOR/IMMEDIATE",
-  "note": "short reason"
+    "severity": "LOW/MEDIUM/HIGH/CRITICAL",
+    "urgency": "MONITOR/IMMEDIATE",
+    "note": "short reason"
 }}
 """
 
     response = llm.invoke(prompt)
     state["risk"] = safe_parse(response.content)
     return state
-# ----------- DECISION AGENT -----------
 
-def decision_agent(state):
-    risk_output = state["risk"]
+
+def decision_agent(state: State) -> State:
     crisis_type = state["vision"]["crisis"]
 
     prompt = f"""
@@ -141,18 +119,14 @@ Crisis type:
 {crisis_type}
 
 Risk:
-{risk_output}
+{state["risk"]}
 
-RULES:
-- FIRE or GAS LEAK → EVACUATE
-- PERSON COLLAPSE or MEDICAL → ALERT (call emergency responders)
-- Only EVACUATE if large-scale danger
+Rules:
+- FIRE or GAS LEAK means EVACUATE.
+- PERSON COLLAPSE or MEDICAL means ALERT.
+- Only EVACUATE for large-scale danger.
 
-STRICT RULES:
-- Return ONLY valid JSON
-- No explanation
-
-Format:
+Return only valid JSON:
 {{
     "decision": "EVACUATE/ALERT/IGNORE",
     "priority": "LOW/MEDIUM/HIGH"
@@ -162,22 +136,16 @@ Format:
     response = llm.invoke(prompt)
     state["decision"] = safe_parse(response.content)
     return state
-# ----------- ACTION AGENT -----------
 
-def action_agent(state):
-    decision_output = state["decision"]
 
+def action_agent(state: State) -> State:
     prompt = f"""
 You are an emergency execution system.
 
 Input:
-{decision_output}
+{state["decision"]}
 
-STRICT RULES:
-
-* Return ONLY valid JSON
-
-Format:
+Return only valid JSON:
 {{
     "tool": "send_alert/log_event",
     "message": "short action message"
@@ -189,102 +157,80 @@ Format:
     return state
 
 
-# ----------- GRAPH -----------
-
-graph = StateGraph(State)
-
-graph.add_node("fusion", fusion_agent)
-graph.add_node("risk", risk_agent)
-graph.add_node("decision", decision_agent)
-graph.add_node("action", action_agent)
-
-graph.set_entry_point("fusion")
-
-graph.add_edge("fusion", "risk")
-graph.add_edge("risk", "decision")
-graph.add_edge("decision", "action")
-
-app = graph.compile()
+def build_graph():
+    graph = StateGraph(State)
+    graph.add_node("fusion", fusion_agent)
+    graph.add_node("risk", risk_agent)
+    graph.add_node("decision", decision_agent)
+    graph.add_node("action", action_agent)
+    graph.set_entry_point("fusion")
+    graph.add_edge("fusion", "risk")
+    graph.add_edge("risk", "decision")
+    graph.add_edge("decision", "action")
+    return graph.compile()
 
 
-# ----------- INPUT -----------
-events = [
-    {
-        "vision": {
-            "crisis": "fire",
-            "confidence": 0.9,
-            "location": "camera_1"
-        },
-        "social": {
-            "crisis": "fire",
-            "confidence": 0.8,
-            "text": "fire in mall food court"
-        }
-    },
-    {
-        "vision": {
-            "crisis": "person collapse",
-            "confidence": 0.85,
-            "location": "camera_2"
-        },
-        "social": {
-            "crisis": "medical emergency",
-            "confidence": 0.9,
-            "text": "someone fainted near entrance"
-        }
-    }
-]
-
-# ----------- RUN MULTIPLE EVENTS -----------
-
-# ----------- RUN MULTIPLE EVENTS -----------
-
-results = []
-
-for i, event in enumerate(events):
-    print(f"\n--- EVENT {i+1} ---\n")
-
-    result = app.invoke(event)
-    results.append(result)
-
-    print(result)
-
-
-# ----------- PRIORITIZATION -----------
-
-def prioritize(events):
+def prioritize(events: list[State]) -> list[State]:
     priority_score = {
         "EVACUATE": 3,
         "ALERT": 2,
-        "IGNORE": 1
+        "IGNORE": 1,
     }
-
     crisis_weight = {
         "fire": 3,
         "gas leak": 3,
         "person collapse": 2,
-        "medical emergency": 2
+        "medical emergency": 2,
     }
 
-    def score(e):
-        decision_score = priority_score.get(e["decision"]["decision"], 0)
-        crisis = e["vision"]["crisis"]
-        crisis_score = crisis_weight.get(crisis, 1)
-
+    def score(event: State) -> int:
+        decision_score = priority_score.get(event["decision"]["decision"], 0)
+        crisis_score = crisis_weight.get(event["vision"]["crisis"], 1)
         return decision_score + crisis_score
 
     return sorted(events, key=score, reverse=True)
 
 
-print("\n--- PRIORITIZED RESPONSE ---\n")
+def run_demo() -> None:
+    app = build_graph()
+    events = [
+        {
+            "vision": {
+                "crisis": "fire",
+                "confidence": 0.9,
+                "location": "camera_1",
+            },
+            "social": {
+                "crisis": "fire",
+                "confidence": 0.8,
+                "text": "fire in mall food court",
+            },
+        },
+        {
+            "vision": {
+                "crisis": "person collapse",
+                "confidence": 0.85,
+                "location": "camera_2",
+            },
+            "social": {
+                "crisis": "medical emergency",
+                "confidence": 0.9,
+                "text": "someone fainted near entrance",
+            },
+        },
+    ]
 
-sorted_events = prioritize(results)
+    results = []
+    for index, event in enumerate(events, start=1):
+        print(f"\n--- EVENT {index} ---\n")
+        result = app.invoke(event)
+        results.append(result)
+        print(result)
 
-for e in sorted_events:
-    print(
-        e["vision"]["crisis"],
-        "→",
-        e["decision"]["decision"],
-        "|",
-        e["action"]["tool"]
-    )
+    print("\n--- PRIORITIZED RESPONSE ---\n")
+    for event in prioritize(results):
+        print(event["vision"]["crisis"], "->", event["decision"]["decision"], "|", event["action"]["tool"])
+
+
+if __name__ == "__main__":
+    run_demo()

@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 from ultralytics import YOLO
 
 
@@ -9,6 +10,8 @@ DEFAULT_VIDEO_PATH = "videos/fire.mp4"
 FIRE_CONFIDENCE_THRESHOLD = 0.30
 PERSON_CONFIDENCE_THRESHOLD = 0.30
 MIN_BOX_AREA = 80
+MIN_VISUAL_FIRE_AREA = 45
+MAX_VISUAL_FIRE_AREA = 3500
 INFERENCE_IMAGE_SIZE = 960
 
 PERSON_CLASS_ID = 0
@@ -35,6 +38,7 @@ def create_empty_event() -> dict:
         "person": False,
         "fall_detected": False,
         "confidence": 0.0,
+        "_person_boxes": [],
     }
 
 
@@ -56,6 +60,29 @@ def draw_box(frame, box_coordinates, label: str, color: tuple[int, int, int]) ->
         2,
         cv2.LINE_AA,
     )
+
+
+def rectangle_iou(first_box: tuple[int, int, int, int], second_box: tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = first_box
+    bx1, by1, bx2, by2 = second_box
+
+    intersection_x1 = max(ax1, bx1)
+    intersection_y1 = max(ay1, by1)
+    intersection_x2 = min(ax2, bx2)
+    intersection_y2 = min(ay2, by2)
+
+    intersection_area = max(0, intersection_x2 - intersection_x1) * max(0, intersection_y2 - intersection_y1)
+    first_area = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    second_area = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union_area = first_area + second_area - intersection_area
+
+    if union_area == 0:
+        return 0.0
+    return intersection_area / union_area
+
+
+def overlaps_person(box_coordinates: tuple[int, int, int, int], event: dict) -> bool:
+    return any(rectangle_iou(box_coordinates, person_box) > 0.10 for person_box in event["_person_boxes"])
 
 
 def get_class_name(model: YOLO, class_id: int) -> str:
@@ -109,6 +136,51 @@ def detect_fire_and_smoke(frame, event: dict) -> None:
             draw_box(frame, coordinates, label, color)
 
 
+def detect_visual_fire(frame, event: dict) -> None:
+    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    lower_orange = np.array([0, 130, 170])
+    upper_orange = np.array([35, 255, 255])
+    lower_red = np.array([160, 130, 170])
+    upper_red = np.array([179, 255, 255])
+
+    warm_mask = cv2.bitwise_or(
+        cv2.inRange(hsv_frame, lower_orange, upper_orange),
+        cv2.inRange(hsv_frame, lower_red, upper_red),
+    )
+
+    blue_channel, green_channel, red_channel = cv2.split(frame)
+    dominance_mask = (
+        (red_channel > green_channel * 0.95)
+        & (red_channel > blue_channel * 1.15)
+        & (red_channel > 120)
+    ).astype(np.uint8) * 255
+
+    fire_mask = cv2.bitwise_and(warm_mask, dominance_mask)
+    fire_mask = cv2.morphologyEx(fire_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    fire_mask = cv2.dilate(fire_mask, np.ones((5, 5), np.uint8), iterations=1)
+
+    contours, _ = cv2.findContours(fire_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    total_fire_area = sum(cv2.contourArea(contour) for contour in contours)
+    if total_fire_area < MIN_VISUAL_FIRE_AREA or total_fire_area > MAX_VISUAL_FIRE_AREA:
+        return
+
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < MIN_VISUAL_FIRE_AREA:
+            continue
+
+        x, y, width, height = cv2.boundingRect(contour)
+        box_coordinates = (x, y, x + width, y + height)
+        if overlaps_person(box_coordinates, event):
+            continue
+
+        confidence = min(0.95, 0.35 + (area / max(1, frame.shape[0] * frame.shape[1])) * 12)
+        event["fire"] = True
+        event["confidence"] = max(event["confidence"], confidence)
+        draw_box(frame, box_coordinates, f"fire {confidence:.2f}", FIRE_COLOR)
+
+
 def detect_person_and_fall(frame, event: dict) -> None:
     results = person_model.predict(
         frame,
@@ -131,6 +203,7 @@ def detect_person_and_fall(frame, event: dict) -> None:
 
             event["person"] = True
             event["confidence"] = max(event["confidence"], confidence)
+            event["_person_boxes"].append((x1, y1, x2, y2))
 
             is_fall_posture = width > height
             if is_fall_posture:
@@ -143,8 +216,11 @@ def detect_person_and_fall(frame, event: dict) -> None:
 
 def process_frame(frame) -> dict:
     event = create_empty_event()
-    detect_fire_and_smoke(frame, event)
     detect_person_and_fall(frame, event)
+    detect_fire_and_smoke(frame, event)
+    if not event["fire"] and not event["smoke"]:
+        detect_visual_fire(frame, event)
+    event.pop("_person_boxes", None)
     return event
 
 

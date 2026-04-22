@@ -1,6 +1,6 @@
-# Vision Agent
+# AI Crisis Response
 
-Python-based AI Crisis Response pipeline:
+Python-based crisis response pipeline:
 
 ```text
 Video Input -> Vision Detection -> Event Structuring -> Danger Detection -> Decision Engine -> Alert System
@@ -14,6 +14,7 @@ ai-crisis-response/
 ├── decision_engine.py
 ├── alert_system.py
 ├── test_runner.py
+├── main.py
 ├── fire_model.pt
 ├── yolov8n.pt
 └── videos/
@@ -21,7 +22,13 @@ ai-crisis-response/
     └── fall.mp4
 ```
 
-## Usage
+## Install
+
+```bash
+pip install -r requirements.txt
+```
+
+## Vision Usage
 
 ```python
 from vision_agent import process_frame
@@ -29,7 +36,7 @@ from vision_agent import process_frame
 event = process_frame(frame)
 ```
 
-## Output
+## Vision Output
 
 ```python
 {
@@ -48,8 +55,12 @@ python test_runner.py --video videos/fire.mp4
 python test_runner.py --video videos/fall.mp4
 ```
 
-## Requirements
+## LLM Agent Demo
+
+Create a local `.env` from `.env.example` and set `GROQ_API_KEY`, then run:
 
 ```bash
-pip install ultralytics opencv-python
+python main.py
 ```
+
+Do not commit `.env` or model/video files.

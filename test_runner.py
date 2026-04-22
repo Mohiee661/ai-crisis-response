@@ -21,6 +21,7 @@ def update_stability_counter(active: bool, current_count: int) -> int:
 def apply_temporal_stability(event: dict, fire_frames: int, fall_frames: int) -> dict:
     stable_event = event.copy()
     stable_event["fire"] = event["fire"] and fire_frames >= STABILITY_FRAMES
+    stable_event["smoke"] = event["smoke"] and fire_frames >= STABILITY_FRAMES
     stable_event["fall_detected"] = event["fall_detected"] and fall_frames >= STABILITY_FRAMES
     return stable_event
 
@@ -32,6 +33,7 @@ def run_pipeline(video_path: str) -> None:
 
     fire_frames = 0
     fall_frames = 0
+    last_action = "NO_ACTION"
 
     try:
         while True:
@@ -40,7 +42,7 @@ def run_pipeline(video_path: str) -> None:
                 break
 
             event = vision_agent.process_frame(frame)
-            fire_frames = update_stability_counter(event["fire"], fire_frames)
+            fire_frames = update_stability_counter(event["fire"] or event["smoke"], fire_frames)
             fall_frames = update_stability_counter(event["fall_detected"], fall_frames)
             stable_event = apply_temporal_stability(event, fire_frames, fall_frames)
 
@@ -51,7 +53,10 @@ def run_pipeline(video_path: str) -> None:
             print(f"[DANGER] {danger}")
             print(f"[ACTION] {action}")
 
-            send_alert(action)
+            if action != "NO_ACTION" and action != last_action:
+                send_alert(action)
+            last_action = action
+
             cv2.imshow(WINDOW_NAME, frame)
 
             if cv2.waitKey(1) == 27:
