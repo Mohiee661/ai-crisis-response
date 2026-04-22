@@ -1,4 +1,7 @@
+*.mp4
+*.pt
 .env
 __pycache__/
 **/__pycache__/
 *.pyc
+.pytest_cache/

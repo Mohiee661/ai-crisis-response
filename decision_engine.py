@@ -1,4 +1,9 @@
-def detect_danger(event: dict) -> str:
+from __future__ import annotations
+
+from pipeline_support import VisionEvent
+
+
+def detect_danger(event: VisionEvent | dict) -> str:
     fire_risk = event["fire"] or event["smoke"]
     medical_risk = event["fall_detected"]
 

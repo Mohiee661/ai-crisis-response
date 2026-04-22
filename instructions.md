@@ -1,25 +1,31 @@
 # AI Crisis Response Instructions
 
-## Pipeline
+## Runtime Flow
 
 ```text
-Video Input -> Vision Detection -> Event Structuring -> Danger Detection -> Decision Engine -> Alert System
+detection -> fusion -> risk -> decision -> action
 ```
+
+- `vision_agent.py` handles detection and returns a normalized `VisionEvent`.
+- `main.py` takes stable live events and runs them through the LangGraph pipeline.
+- `test_runner.py` runs the deterministic non-LLM path.
 
 ## Vision Agent
 
-`vision_agent.py` loads YOLO models once and exposes:
+Use:
 
 ```python
 from vision_agent import process_frame
 
-event = process_frame(frame)
+event = process_frame(frame, camera_id="camera-0", frame_index=12)
 ```
 
 Event format:
 
 ```python
 {
+    "camera_id": "camera-0",
+    "frame_index": 12,
     "fire": False,
     "smoke": False,
     "person": False,
@@ -28,38 +34,57 @@ Event format:
 }
 ```
 
-The core function returns structured data and annotates the input frame. It does not print logs.
+Notes:
 
-## Detection Notes
+- Model loading is lazy and configurable through `FIRE_MODEL_PATH`, `PERSON_MODEL_PATH`, or `MODEL_DIR`.
+- Fire and smoke detection rely only on the configured fire/smoke YOLO model.
+- The module logs through `logging`; it does not print raw event lines directly.
+- `camera_id` and `frame_index` are included so the pipeline can be extended to multiple camera streams.
 
-- Fire/smoke first uses `fire_model.pt`.
-- If the model does not expose fire/smoke classes, the agent uses a visual flame-color fallback.
-- Person detection uses `yolov8n.pt`.
-- Fall detection uses a simple posture heuristic: bounding box width greater than height.
-- `test_runner.py` applies 3-frame temporal stability before making decisions.
+## LangGraph Pipeline
 
-## Decision Engine
+`main.py` accepts real detections from `vision_agent.process_frame(...)`.
 
-- `FIRE` -> `ALERT_FIRE_STATION`
-- `MEDICAL` -> `ALERT_AMBULANCE`
-- `BOTH` -> `ALERT_BOTH`
-- `SAFE` -> `NO_ACTION`
+- Fusion uses the live vision event plus a small context object.
+- Risk considers recent camera-local history.
+- Decision maps the normalized danger state to the existing alert actions.
+- Action produces the final dispatch payload used by `alert_system.py`.
 
-## Run Commands
+Run it with:
 
 ```bash
-python test_runner.py --video videos/fire.mp4
-python test_runner.py --video videos/fall.mp4
+python main.py --video 0 --display
+python main.py --video path/to/video.mp4 --camera-id entrance-cam
 ```
+
+If Groq credentials are missing, the pipeline falls back to deterministic fusion and risk outputs.
+
+## Deterministic Runner
+
+Run:
+
+```bash
+python test_runner.py --video 0 --display
+python test_runner.py --video path/to/video.mp4
+```
+
+This path still applies 3-frame temporal stability before mapping to alerts.
 
 ## Local Assets
 
-These are intentionally ignored by Git:
+The repository does not require bundled sample videos.
 
-- `.env`
-- `fire_model.pt`
-- `yolov8n.pt`
-- `videos/fire.mp4`
-- `videos/fall.mp4`
+- Use `--video 0` for a webcam.
+- Use `--video path/to/file.mp4` for a local video.
+- Keep `.pt` model files local; they are ignored by Git.
 
-Use `.env.example` as the template for local LLM credentials.
+## Tests
+
+```bash
+pytest -q
+```
+
+Included tests cover:
+
+- normalized vision event output
+- danger and action mapping
