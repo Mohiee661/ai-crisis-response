@@ -157,14 +157,11 @@ def normalize_video_source(source: str) -> int | str:
 class TemporalEventTracker:
     def __init__(self, stability_frames: int = 3):
         self.stability_frames = stability_frames
-        self.fire_threshold = get_env_float("FIRE_THRESHOLD", 0.25)
-        self.smoke_threshold = get_env_float("SMOKE_THRESHOLD", 0.10)
-        self.motion_threshold = get_env_float("MOTION_THRESHOLD", 0.50)
-        self.fire_temporal_window = get_env_int("FIRE_TEMPORAL_WINDOW", max(5, stability_frames))
-        self.fire_temporal_min_frames = get_env_int(
-            "FIRE_TEMPORAL_MIN_FRAMES",
-            min(self.fire_temporal_window, max(2, stability_frames - 1)),
-        )
+        self.fire_threshold = get_env_float("FIRE_THRESHOLD", 0.75)
+        self.smoke_threshold = get_env_float("SMOKE_THRESHOLD", 0.60)
+        self.motion_threshold = get_env_float("MOTION_THRESHOLD", 0.02)
+        self.fire_temporal_window = get_env_int("TEMPORAL_WINDOW", 5)
+        self.fire_temporal_min_frames = get_env_int("TEMPORAL_MIN_HITS", 3)
         self.fall_temporal_window = get_env_int("FALL_TEMPORAL_WINDOW", max(3, stability_frames))
         self.fall_temporal_min_frames = get_env_int(
             "FALL_TEMPORAL_MIN_FRAMES",
@@ -254,27 +251,23 @@ class TemporalEventTracker:
         validated_smoke = False
 
         if raw_fire_detected and not motion_ok:
-            validation_reason = (
-                f"low motion ({motion_score:.2f} < {self.motion_threshold:.2f})"
-            )
-        elif raw_fire_detected and smoke_supported and motion_ok:
-            validated_fire = True
-            validated_smoke = True
-            validation_state = "ALERT"
-            validation_reason = "fire + smoke confirmation"
-        elif raw_fire_detected and temporal_supported and motion_ok:
-            validated_fire = True
-            validation_state = "ALERT"
-            validation_reason = (
-                f"temporal consistency {fire_support}/{self.fire_temporal_window}"
-            )
+            validation_reason = f"low motion ({motion_score:.2f} < {self.motion_threshold:.2f})"
+        elif raw_fire_detected and motion_ok:
+            if smoke_supported:
+                validated_fire = True
+                validated_smoke = True
+                validation_state = "ALERT"
+                validation_reason = "fire + smoke confirmation"
+            elif temporal_supported:
+                validated_fire = True
+                validation_state = "ALERT"
+                validation_reason = f"temporal consistency {fire_support}/{self.fire_temporal_window}"
+            else:
+                validation_state = "MONITOR"
+                validation_reason = f"no smoke support; temporal {fire_support}/{self.fire_temporal_min_frames}"
         elif weak_fire_signal and motion_ok:
             validation_state = "MONITOR"
-            if raw_fire_detected and not smoke_supported:
-                validation_reason = (
-                    f"no smoke support; temporal {fire_support}/{self.fire_temporal_min_frames}"
-                )
-            elif raw_smoke_detected and not raw_fire_detected:
+            if raw_smoke_detected and not raw_fire_detected:
                 validation_reason = "smoke without fire confirmation"
             else:
                 validation_reason = "weak fire signal"

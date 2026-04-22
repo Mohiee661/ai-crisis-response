@@ -73,8 +73,9 @@ def run_pipeline(
                 send_alert(action, camera_id=camera_id)
 
             if display:
+                cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
                 cv2.imshow(WINDOW_NAME, frame)
-                if cv2.waitKey(1) == 27:
+                if cv2.waitKey(30) == 27:
                     break
 
             frame_index += 1

@@ -1,7 +1,13 @@
 opencv-python
+opencv-python
 ultralytics
 numpy
 python-dotenv
 langchain-groq
 langgraph
 pytest
+tqdm
+pandas
+requests
+fastapi
+uvicorn

@@ -28,6 +28,7 @@ from pipeline_support import (
 )
 from social_agent import fetch_social_signals
 from vision_agent import process_frame
+import api_server
 
 
 load_dotenv()
@@ -430,7 +431,7 @@ def discover_demo_videos() -> list[str]:
     return sorted(glob.glob(demo_glob))
 
 
-def run_demo_cycle(display: bool = False, max_frames: int | None = None) -> None:
+def run_demo_cycle(display: bool = True, max_frames: int | None = None) -> None:
     demo_videos = discover_demo_videos()
     if not demo_videos:
         raise RuntimeError("DEMO_MODE is enabled, but no demo videos were found.")
@@ -454,6 +455,53 @@ def run_demo_cycle(display: bool = False, max_frames: int | None = None) -> None
         )
 
 
+def run_validation_mode():
+    videos = ["videos/fire.mp4", "videos/fall.mp4"]
+    summary = {
+        "total_frames": 0,
+        "fire_frames": 0,
+        "false_fire_frames": 0,
+        "fall_frames": 0
+    }
+    
+    tracker = TemporalEventTracker()
+    for video_path in videos:
+        if not os.path.exists(video_path):
+            logger.error(f"Validation video not found: {video_path}")
+            continue
+            
+        camera_id = Path(video_path).stem
+        cap = cv2.VideoCapture(normalize_video_source(video_path))
+        frame_index = 0
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            live_event = process_frame(frame, camera_id=camera_id, frame_index=frame_index)
+            stable_event = tracker.stabilize(live_event, frame)
+            
+            summary["total_frames"] += 1
+            if stable_event.get("fire", False) and stable_event.get("validation_state", "SAFE") == "ALERT":
+                if "fire" in camera_id.lower():
+                    summary["fire_frames"] += 1
+                else:
+                    summary["false_fire_frames"] += 1
+                    
+            if stable_event.get("person", False) or stable_event.get("fall_detected", False):
+                if "fall" in camera_id.lower():
+                    summary["fall_frames"] += 1
+                
+            print(f"{camera_id} Frame {frame_index}: Fire={stable_event.get('fire')} Smoke={stable_event.get('smoke')} Person={stable_event.get('person')} Conf={stable_event.get('confidence', 0):.2f} State={stable_event.get('validation_state')}")
+            frame_index += 1
+            
+        cap.release()
+        
+    print("\nValidation Summary:")
+    print(json.dumps(summary, indent=2))
+
+
 def run_live_graph(
     video_source: str,
     camera_id: str = DEFAULT_CAMERA_ID,
@@ -465,6 +513,9 @@ def run_live_graph(
     cap = cv2.VideoCapture(normalize_video_source(video_source))
     if not cap.isOpened():
         raise RuntimeError(f"Unable to open video source: {video_source}")
+
+    api_server.start_server()
+    FRAME_SKIP = 2
 
     frame_index = 0
     try:
@@ -509,9 +560,19 @@ def run_live_graph(
                     send_alert(action, camera_id=camera_id, details=result["action_output"]["message"])
 
             if display:
+                cv2.namedWindow("AI Crisis Response Graph", cv2.WINDOW_NORMAL)
                 cv2.imshow("AI Crisis Response Graph", frame)
-                if cv2.waitKey(1) == 27:
+                if cv2.waitKey(30) == 27:
                     break
+
+            if frame_index % FRAME_SKIP == 0:
+                api_server.update_state({
+                    "frame": api_server.encode_frame(frame),
+                    "metrics": {
+                        "confidence": stable_event.get("confidence", 0.0),
+                        "status": attention_state
+                    }
+                })
 
             frame_index += 1
     finally:
@@ -552,13 +613,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Cycle through the configured demo videos instead of a single input source.",
     )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Run strict validation suite without invoking LLM/LangGraph.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    configure_logging(args.log_level)
     if args.demo_mode or DEFAULT_DEMO_MODE:
+        args.log_level = "WARNING"
+    configure_logging(args.log_level)
+    if args.validate:
+        run_validation_mode()
+    elif args.demo_mode or DEFAULT_DEMO_MODE:
         run_demo_cycle(display=args.display, max_frames=args.max_frames)
     else:
         run_live_graph(

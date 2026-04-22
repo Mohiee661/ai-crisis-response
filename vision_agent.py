@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import cv2
 from dotenv import load_dotenv
 
@@ -23,15 +24,15 @@ load_dotenv()
 
 
 DEFAULT_VIDEO_SOURCE = os.getenv("CRISIS_VIDEO_SOURCE", "0")
-DEFAULT_FIRE_MODEL_NAME = "fire_smoke_yolov8n.pt"
+DEFAULT_FIRE_MODEL_NAME = "best.pt"
 DEFAULT_PERSON_MODEL_NAME = "yolov8n.pt"
 FIRE_CLASS_ID = get_env_int("FIRE_CLASS_ID", 0)
 SMOKE_CLASS_ID = get_env_int("SMOKE_CLASS_ID", 1)
 
-FIRE_CONFIDENCE_THRESHOLD = get_env_float("FIRE_THRESHOLD", 0.25)
-SMOKE_CONFIDENCE_THRESHOLD = get_env_float("SMOKE_THRESHOLD", 0.10)
+FIRE_CONFIDENCE_THRESHOLD = get_env_float("FIRE_THRESHOLD", 0.75)
+SMOKE_CONFIDENCE_THRESHOLD = get_env_float("SMOKE_THRESHOLD", 0.60)
 PERSON_CONFIDENCE_THRESHOLD = 0.30
-MIN_BOX_AREA = 80
+MIN_BOX_AREA = get_env_int("MIN_BOX_AREA", 500)
 MIN_FIRE_BOX_AREA = get_env_int("FIRE_MIN_BOX_AREA", 250)
 MAX_FIRE_BOX_AREA = get_env_int("FIRE_MAX_BOX_AREA", 2000)
 MIN_SMOKE_BOX_AREA = get_env_int("SMOKE_MIN_BOX_AREA", 500)
@@ -41,6 +42,7 @@ MAX_FIRE_ASPECT_RATIO = get_env_float("FIRE_MAX_ASPECT_RATIO", 1.50)
 MIN_SMOKE_ASPECT_RATIO = get_env_float("SMOKE_MIN_ASPECT_RATIO", 0.20)
 MAX_SMOKE_ASPECT_RATIO = get_env_float("SMOKE_MAX_ASPECT_RATIO", 2.50)
 INFERENCE_IMAGE_SIZE = 960
+MOTION_THRESHOLD = get_env_float("MOTION_THRESHOLD", 0.02)
 
 PERSON_CLASS_ID = 0
 FIRE_COLOR = (0, 0, 255)
@@ -53,6 +55,7 @@ logger = logging.getLogger(__name__)
 
 _FIRE_MODEL_BUNDLE: tuple[Any, list[int], list[int], str] | None = None
 _PERSON_MODEL: Any | None = None
+_PREV_GRAY_FRAMES: dict[str, Any] = {}
 
 
 def _resolve_model_path(env_var_name: str, default_name: str) -> Path:
@@ -105,7 +108,9 @@ def _load_model(path: Path, env_var_name: str):
     try:
         return YOLO(str(path))
     except Exception as exc:
-        raise RuntimeError(f"Failed to load model '{path}': {exc}") from exc
+        import sys
+        print(f"ERROR: Failed to load model '{path}': {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _get_fire_model_bundle() -> tuple[Any, list[int], list[int], str]:
@@ -115,20 +120,19 @@ def _get_fire_model_bundle() -> tuple[Any, list[int], list[int], str]:
 
     model_path = _resolve_fire_model_path()
     model = _load_model(model_path, "FIRE_MODEL_PATH")
-    raw_class_names = model.model.names
+    
+    if hasattr(model, 'names'):
+        raw_class_names = model.names
+    elif hasattr(model, 'model') and hasattr(model.model, 'names'):
+        raw_class_names = model.model.names
+    else:
+        raw_class_names = {0: "fire", 1: "smoke"}
+        
     class_names = (
         raw_class_names
         if isinstance(raw_class_names, dict)
         else {index: name for index, name in enumerate(raw_class_names)}
     )
-    fire_label = str(class_names.get(FIRE_CLASS_ID, "")).lower()
-    smoke_label = str(class_names.get(SMOKE_CLASS_ID, "")).lower()
-    if "fire" not in fire_label or "smoke" not in smoke_label:
-        raise RuntimeError(
-            "Configured fire model does not expose the expected class mapping: "
-            f"fire={FIRE_CLASS_ID} ({class_names.get(FIRE_CLASS_ID)}), "
-            f"smoke={SMOKE_CLASS_ID} ({class_names.get(SMOKE_CLASS_ID)})."
-        )
     fire_classes = [FIRE_CLASS_ID]
     smoke_classes = [SMOKE_CLASS_ID]
 
@@ -234,46 +238,73 @@ def is_reasonable_box(
     )
 
 
-def detect_fire_and_smoke(frame, event: VisionEvent) -> float:
+def is_fire_color(frame, coords) -> bool:
+    x1, y1, x2, y2 = map(int, coords)
+    roi = frame[y1:y2, x1:x2]
+    if roi.size == 0:
+        return False
+    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hue = hsv_roi[:, :, 0]
+    hue_mask = (hue >= 0) & (hue <= 50)
+    b, g, r = cv2.split(roi)
+    red_dominant = (r > b) & (r > g)
+    fire_pixels = hue_mask & red_dominant
+    fire_ratio = np.sum(fire_pixels) / (roi.shape[0] * roi.shape[1] + 1e-6)
+    return fire_ratio > 0.01
+
+
+def compute_roi_motion(frame_gray, prev_gray, coords) -> float:
+    x1, y1, x2, y2 = map(int, coords)
+    diff = cv2.absdiff(frame_gray[y1:y2, x1:x2], prev_gray[y1:y2, x1:x2])
+    return float(cv2.mean(diff)[0])
+
+
+def detect_fire_and_smoke(frame, event: VisionEvent, camera_id: str) -> float:
     fire_model, fire_classes, smoke_classes, _ = _get_fire_model_bundle()
+    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    prev_gray = _PREV_GRAY_FRAMES.get(camera_id)
+    _PREV_GRAY_FRAMES[camera_id] = frame_gray
+
     results = fire_model.predict(
         frame,
         conf=min(FIRE_CONFIDENCE_THRESHOLD, SMOKE_CONFIDENCE_THRESHOLD),
         imgsz=INFERENCE_IMAGE_SIZE,
         verbose=False,
     )
-
+    
     max_fire_confidence = 0.0
     max_smoke_confidence = 0.0
+    
     for result in results:
         for box in result.boxes:
             cls = int(box.cls[0])
             conf = float(box.conf[0])
             coords = box.xyxy[0]
+            x1, y1, x2, y2 = map(int, coords)
+            w, h = x2 - x1, y2 - y1
 
-            if cls in fire_classes:
-                if conf < FIRE_CONFIDENCE_THRESHOLD or not is_reasonable_box(
-                    coords,
-                    min_area=MIN_FIRE_BOX_AREA,
-                    max_area=MAX_FIRE_BOX_AREA,
-                    min_aspect_ratio=MIN_FIRE_ASPECT_RATIO,
-                    max_aspect_ratio=MAX_FIRE_ASPECT_RATIO,
-                ):
+            if cls == FIRE_CLASS_ID:
+                if conf < FIRE_CONFIDENCE_THRESHOLD:
                     continue
-
+                if w * h < MIN_BOX_AREA:
+                    continue
+                if not is_fire_color(frame, coords):
+                    continue
+                if prev_gray is not None:
+                    motion = compute_roi_motion(frame_gray, prev_gray, coords)
+                    if motion < MOTION_THRESHOLD:
+                        continue
+                
                 max_fire_confidence = max(max_fire_confidence, conf)
                 event["fire"] = True
                 draw_box(frame, coords, f"fire {conf:.2f}", FIRE_COLOR)
-            elif cls in smoke_classes:
-                if conf < SMOKE_CONFIDENCE_THRESHOLD or not is_reasonable_box(
-                    coords,
-                    min_area=MIN_SMOKE_BOX_AREA,
-                    max_area=MAX_SMOKE_BOX_AREA,
-                    min_aspect_ratio=MIN_SMOKE_ASPECT_RATIO,
-                    max_aspect_ratio=MAX_SMOKE_ASPECT_RATIO,
-                ):
+                
+            elif cls == SMOKE_CLASS_ID:
+                if conf < SMOKE_CONFIDENCE_THRESHOLD:
                     continue
-
+                if w * h < MIN_BOX_AREA:
+                    continue
+                    
                 max_smoke_confidence = max(max_smoke_confidence, conf)
                 event["smoke"] = True
                 draw_box(frame, coords, f"smoke {conf:.2f}", SMOKE_COLOR)
@@ -329,8 +360,16 @@ def process_frame(
 ) -> VisionEvent:
     event = create_vision_event(camera_id=camera_id, frame_index=frame_index)
 
-    person_confidence, _ = detect_person_and_fall(frame, event)
-    fire_confidence = detect_fire_and_smoke(frame, event)
+    person_confidence = 0.0
+    fire_confidence = 0.0
+
+    if "fire" in camera_id.lower():
+        fire_confidence = detect_fire_and_smoke(frame, event, camera_id)
+    elif "fall" in camera_id.lower() or "person" in camera_id.lower():
+        person_confidence, _ = detect_person_and_fall(frame, event)
+    else:
+        person_confidence, _ = detect_person_and_fall(frame, event)
+        fire_confidence = detect_fire_and_smoke(frame, event, camera_id)
 
     event["confidence"] = max(person_confidence, fire_confidence)
     log_payload(logger, logging.DEBUG, "vision_event", event)
