@@ -14,13 +14,6 @@ async function override(action) {
   } catch (e) { console.error('Override failed', e); }
 }
 
-// ── Simulate/Reset ──
-document.getElementById('sim-btn').addEventListener('click', () => fetch(`${API}/simulate`, { method: 'POST' }));
-document.getElementById('reset-btn').addEventListener('click', () => {
-  fetch(`${API}/reset`, { method: 'POST' });
-  location.reload();
-});
-
 // ── Main Sync Loop ──
 async function sync() {
   try {
@@ -73,14 +66,19 @@ function render(d) {
   }
 
   // LLM Social Summary
+  const socialSlot = document.getElementById('social-summary-slot');
   if (d.llm_summary) {
-    document.getElementById('social-summary-slot').innerHTML = `
+    socialSlot.innerHTML = `
       <div class="social-summary">"${d.llm_summary}"</div>
       <a href="${d.llm_link}" target="_blank" class="social-link">View Source Intelligence →</a>
       <div style="margin-top: 8px; font-size: 0.6rem; color: var(--success); font-weight: 800;">
         Confirmation: ${d.llm_confirmation}
       </div>
     `;
+    socialSlot.style.opacity = '1';
+  } else {
+    socialSlot.innerHTML = '<div class="safe-state">Awaiting automated confirmation...</div>';
+    socialSlot.style.opacity = '0.4';
   }
 
   // System Health

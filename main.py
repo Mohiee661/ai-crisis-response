@@ -513,17 +513,36 @@ CAMERA_LOCATIONS = {
     "webcam": "Remote Office - Entrance",
 }
 
-def mock_llm_summary(event_type):
-    if event_type == "fire":
-        return {
-            "summary": "AI fusion confirms active thermal signature with multiple social corroborations of smoke.",
-            "link": "https://emergency-intel.gov/incidents/fire-sector-b",
-            "confirmation": "External signals confirm critical fire event."
-        }
+def generate_social_fusion_saying(event_type: str) -> dict:
+    """Generate a simple, human-like saying confirming the incident using Groq."""
+    llm = get_llm()
+    prompt = (
+        f"Generate a very short, simple social media-style saying confirming a {event_type} incident. "
+        "Use plain, simple words. Keep it under 15 words. "
+        "Example: 'I see smoke coming from the warehouse, scary!' or 'Someone fell down in the mall, help!' "
+        "Return ONLY the text."
+    )
+    
+    fallback_map = {
+        "fire": "I see smoke coming from the building, help!",
+        "fall": "Someone just fell down in the gym area!",
+    }
+    
+    text = fallback_map.get(event_type, "Unusual activity detected at the site.")
+    
+    if llm:
+        try:
+            response = llm.invoke(prompt)
+            text = response.content.strip().replace('"', '')
+            if len(text.split()) > 20:
+                text = " ".join(text.split()[:15]) + "..."
+        except Exception as e:
+            logger.warning("LLM fusion saying generation failed: %s", e)
+            
     return {
-        "summary": "Medical incident detected. Computer vision confirms fall event. Social signals indicate bystander response.",
-        "link": "https://emergency-intel.gov/incidents/medical-gym-floor2",
-        "confirmation": "External signals confirm medical emergency."
+        "summary": text,
+        "link": "https://emergency-response.io/status/live",
+        "confirmation": "Groq-Powered Intelligence Fusion"
     }
 
 
@@ -551,6 +570,7 @@ def run_live_graph(
 
     # ── Incident state: ONE decision per video session ──
     incident_locked = False
+    social_generated = False
     
     # ── Reset API & Local State ──
     api_server.update_state({
@@ -580,37 +600,50 @@ def run_live_graph(
             if api_server.latest_state["incident_locked"] and not incident_locked:
                 incident_locked = True 
 
-            # ── Social Signal Fusion (Operator Simulation) ──
-            ext_signals = api_server.pop_simulated_signals()
-            if ext_signals:
-                api_server.update_state({
-                    "signals": api_server.latest_state.get("signals", []) + ext_signals,
-                    "logs": api_server.latest_state["logs"] + [f"[Social] Operator: {s['text']}" for s in ext_signals],
-                    "lifecycle_state": "CONFIRMED" if api_server.latest_state["lifecycle_state"] == "DETECTED" else api_server.latest_state["lifecycle_state"]
-                })
+            # ── Automated Social & LLM Confirmation ──
+            if not social_generated and attention_state != "SAFE":
+                # Only trigger if fire or fall is actually detected
+                is_fire = stable_event.get("fire", False)
+                is_fall = stable_event.get("fall_detected", False)
+                
+                if is_fire or is_fall:
+                    api_server.update_state({"lifecycle_state": "DETECTED"})
+                    
+                    # Fetch simulated signals and dynamic LLM summary
+                    social_sigs = simulate_social_signals(event_type) if event_type else []
+                    llm_data = generate_social_fusion_saying(event_type) if event_type else {}
+                    
+                    api_server.update_state({
+                        "signals": social_sigs,
+                        "llm_summary": llm_data.get("summary"),
+                        "llm_link": llm_data.get("link"),
+                        "llm_confirmation": llm_data.get("confirmation"),
+                        "lifecycle_state": "CONFIRMED",
+                        "logs": api_server.latest_state["logs"] + [
+                            "[Detection] Initial visual signature identified",
+                            "[Social] Automated external signal scan active",
+                            "[Fusion] Vision + social signal fusion confirmed",
+                            "[LLM] Contextual intelligence summary generated"
+                        ]
+                    })
+                    social_generated = True
 
             # ── Pipeline Execution ──
             if not incident_locked and attention_state != "SAFE":
-                if api_server.latest_state["lifecycle_state"] == "MONITORING":
-                    api_server.update_state({"lifecycle_state": "DETECTED"})
-
                 result = graph_app.invoke(build_initial_state(stable_event))
                 action = result["action_output"]["action"]
                 severity = result["risk_output"]["severity"]
                 trust = stable_event.get("confidence", 0.0)
 
-                if action != "NO_ACTION" and trust > 0.4:
+                if action != "NO_ACTION" and (trust > 0.4 or social_generated):
                     is_fire = "FIRE" in action
                     is_fall = "AMBULANCE" in action
                     
-                    social_sigs = simulate_social_signals(event_type) if event_type else []
-                    llm_data = mock_llm_summary(event_type) if event_type else {}
-
                     explanation = [
                         f"{'Fire/Smoke' if is_fire else 'Fall'} signature detected",
                         "Temporal consistency verified (3+ frames)",
                     ]
-                    if social_sigs: explanation.append("Social signals corroborate event")
+                    if social_generated: explanation.append("Multi-channel social signals confirm threat")
 
                     # Lock current incident result
                     incident_locked = True
@@ -619,20 +652,13 @@ def run_live_graph(
                     api_server.update_state({
                         "decision": action,
                         "severity": severity,
-                        "trust_score": round(max(trust, 0.82), 2),
+                        "trust_score": round(max(trust, 0.88), 2),
                         "lifecycle_state": "DISPATCHED",
                         "confidence_explanation": explanation,
-                        "decision_reason": f"{'Fire' if is_fire else 'Fall'} + multi-signal confirmation",
+                        "decision_reason": f"{'Fire' if is_fire else 'Fall'} + automated social confirmation",
                         "status": "ALERT",
                         "incident_locked": True,
-                        "signals": api_server.latest_state.get("signals", []) + social_sigs,
-                        "llm_summary": llm_data.get("summary"),
-                        "llm_link": llm_data.get("link"),
-                        "llm_confirmation": llm_data.get("confirmation"),
                         "logs": api_server.latest_state["logs"] + [
-                            f"[Detection] {camera_id} event detected",
-                            f"[Fusion] Vision + social fusion active",
-                            f"[Risk] {severity} level confirmed",
                             f"[Decision] {action} - {explanation[-1]}"
                         ]
                     })

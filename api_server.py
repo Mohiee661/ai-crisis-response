@@ -62,16 +62,6 @@ def get_status():
         latest_state["system_health"]["latency"] = f"{random.randint(40, 52)}ms"
         return latest_state
 
-@app.post("/simulate")
-def simulate_signal():
-    with _sim_lock:
-        _simulated_signals.append({
-            "source": "Manual Trigger",
-            "text": "Operator confirmed visual anomaly via dashboard.",
-            "confidence": 0.90,
-        })
-    return {"ok": True}
-
 @app.post("/reset")
 def reset_incident():
     with state_lock:
