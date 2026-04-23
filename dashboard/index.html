@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Crisis Command Center</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- ═══ HEADER ═══ -->
+  <header>
+    <div class="brand">
+      <h1>AI Crisis Command Center</h1>
+    </div>
+    <div class="header-right">
+      <div id="lifecycle-badge" class="lifecycle-badge MONITORING">MONITORING</div>
+      <button class="sim-btn" id="reset-btn">↺ Reset</button>
+      <button class="sim-btn" id="sim-btn">📡 Social</button>
+      <div class="status-pill" id="status-pill">
+        <span class="status-dot"></span>
+        <span id="status-label">System Online</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══ MAIN ═══ -->
+  <main>
+    <section class="viewport">
+      <div class="video-wrap">
+        <div class="cam-tag" id="cam-tag">CAM_1 | Unknown</div>
+        <div class="playlist-tag" id="playlist-tag">🎥 Now Playing: None</div>
+        <img id="live-feed" src="" alt="">
+      </div>
+      
+      <!-- Manual Override Panel -->
+      <div class="override-panel">
+        <button onclick="override('ALERT_AMBULANCE')">🚑 Dispatch Ambulance</button>
+        <button onclick="override('ALERT_FIRE_ENGINE')">🚒 Dispatch Fire Engine</button>
+        <button onclick="override('IGNORE')" class="ignore">Ignore Alert</button>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <!-- Decision Card -->
+      <div class="card-section">
+        <div class="section-label">Decision Intelligence</div>
+        <div id="decision-slot">
+          <div class="safe-state">NO ACTIVE THREATS</div>
+        </div>
+      </div>
+
+      <!-- LLM Social Panel -->
+      <div class="card-section">
+        <div class="section-label">📡 Social Confirmation</div>
+        <div id="social-summary-slot" class="social-llm-panel">
+          <div class="safe-state">Awaiting fusion...</div>
+        </div>
+        <div id="signals-slot"></div>
+      </div>
+
+      <!-- Health Panel -->
+      <div class="card-section health-panel">
+        <div class="section-label">System Health</div>
+        <div class="health-grid">
+          <div class="health-item"><span>Models</span> <span id="health-models">ACTIVE</span></div>
+          <div class="health-item"><span>Camera</span> <span id="health-camera">CONNECTED</span></div>
+          <div class="health-item"><span>API</span> <span id="health-api">ONLINE</span></div>
+          <div class="health-item"><span>Latency</span> <span id="health-latency">45ms</span></div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ═══ BOTTOM LOGS ═══ -->
+  <footer>
+    <div class="logs-header">
+      <div class="section-label">Intelligence Stream</div>
+    </div>
+    <div class="logs-scroll" id="logs-box"></div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

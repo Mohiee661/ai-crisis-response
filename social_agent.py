@@ -67,3 +67,19 @@ def fetch_social_signals(query: str, location: str | None = None) -> dict:
     if location:
         fallback["text"] = f"{fallback['text']} Location: {location}."
     return fallback
+
+
+def simulate_social_signals(event_type: str) -> list[dict]:
+    """Return deterministic social signals based on detected event type.
+    Used by the dashboard pipeline for realistic signal simulation."""
+    if event_type == "fire":
+        return [
+            {"source": "Twitter", "text": "Smoke seen near building, people evacuating", "confidence": 0.78},
+            {"source": "News Feed", "text": "Fire alarm triggered at industrial zone", "confidence": 0.65},
+        ]
+    if event_type in ("fall", "medical"):
+        return [
+            {"source": "Emergency App", "text": "Person collapsed, bystanders requesting help", "confidence": 0.72},
+            {"source": "Security Radio", "text": "Medical incident reported on floor 2", "confidence": 0.60},
+        ]
+    return []

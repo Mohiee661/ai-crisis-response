@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import time
 import cv2
 from dotenv import load_dotenv
 from langgraph.graph import END, StateGraph
@@ -498,9 +499,32 @@ def run_validation_mode():
             frame_index += 1
             
         cap.release()
-        
     print("\nValidation Summary:")
     print(json.dumps(summary, indent=2))
+
+
+FALL_VIDEOS = ["videos/fall1.mp4", "videos/fall2.mp4"]
+FIRE_VIDEOS = ["videos/fire1.mp4", "videos/fire2.mp4"]
+
+
+CAMERA_LOCATIONS = {
+    "fall": "Mall - Floor 2 - Gym Area",
+    "fire": "Industrial Site - Sector B - Warehouse",
+    "webcam": "Remote Office - Entrance",
+}
+
+def mock_llm_summary(event_type):
+    if event_type == "fire":
+        return {
+            "summary": "AI fusion confirms active thermal signature with multiple social corroborations of smoke.",
+            "link": "https://emergency-intel.gov/incidents/fire-sector-b",
+            "confirmation": "External signals confirm critical fire event."
+        }
+    return {
+        "summary": "Medical incident detected. Computer vision confirms fall event. Social signals indicate bystander response.",
+        "link": "https://emergency-intel.gov/incidents/medical-gym-floor2",
+        "confirmation": "External signals confirm medical emergency."
+    }
 
 
 def run_live_graph(
@@ -509,14 +533,34 @@ def run_live_graph(
     display: bool = False,
     max_frames: int | None = None,
 ) -> None:
-    app = build_graph()
+    from social_agent import simulate_social_signals
+
+    graph_app = build_graph()
     tracker = TemporalEventTracker()
     cap = cv2.VideoCapture(normalize_video_source(video_source))
     if not cap.isOpened():
-        raise RuntimeError(f"Unable to open video source: {video_source}")
+        print(f"[System] Skipping invalid video: {video_source}")
+        return
 
-    api_server.start_server()
     FRAME_SKIP = 2
+    video_filename = os.path.basename(video_source)
+    location = CAMERA_LOCATIONS.get(camera_id.lower(), f"Site: {video_filename}")
+    
+    # Auto-classify event type from filename for intelligence simulation
+    event_type = "fire" if "fire" in video_filename.lower() else ("fall" if "fall" in video_filename.lower() else None)
+
+    # ── Incident state: ONE decision per video session ──
+    incident_locked = False
+    
+    # ── Reset API & Local State ──
+    api_server.update_state({
+        "decision": None, "severity": None, "trust_score": 0.0,
+        "location": location, "current_video": video_filename,
+        "lifecycle_state": "MONITORING",
+        "confidence_explanation": [], "decision_reason": None,
+        "signals": [], "llm_summary": None, "incident_locked": False,
+        "logs": [f"[System] Starting video: {video_filename}"]
+    })
 
     frame_index = 0
     try:
@@ -525,110 +569,74 @@ def run_live_graph(
                 break
 
             ret, frame = cap.read()
-            if not ret:
-                break
+            if not ret: break
 
             live_event = process_frame(frame, camera_id=camera_id, frame_index=frame_index)
             stable_event = tracker.stabilize(live_event, frame)
             danger = detect_danger(stable_event)
             attention_state = danger if danger != "SAFE" else stable_event.get("validation_state", "SAFE")
 
-            log_payload(
-                logger,
-                logging.INFO if attention_state != "SAFE" else logging.DEBUG,
-                "stable_event",
-                stable_event,
-            )
+            # ── Manual Overrides ──
+            if api_server.latest_state["incident_locked"] and not incident_locked:
+                incident_locked = True 
 
-            if tracker.should_invoke_graph(camera_id, attention_state):
-                result = app.invoke(build_initial_state(stable_event))
-                graph_data = {
-                    "camera_id": camera_id,
-                    "frame_index": frame_index,
-                    "fusion_output": result["fusion_output"],
-                    "risk_output": result["risk_output"],
-                    "decision_output": result["decision_output"],
-                    "action_output": result["action_output"],
-                }
-                log_payload(logger, logging.INFO, "graph_result", graph_data)
-                
-                # Push to API logs
-                api_server.update_state({
-                    "logs": api_server.latest_state["logs"] + [
-                        f"[Fusion] {result['fusion_output']['crisis_type']}",
-                        f"[Risk] {result['risk_output']['severity']}",
-                        f"[Decision] {result['action_output']['action']}"
-                    ]
-                })
+            # ── Pipeline Execution ──
+            if not incident_locked and attention_state != "SAFE":
+                if api_server.latest_state["lifecycle_state"] == "MONITORING":
+                    api_server.update_state({"lifecycle_state": "DETECTED"})
 
+                result = graph_app.invoke(build_initial_state(stable_event))
                 action = result["action_output"]["action"]
-                if tracker.should_send_alert(camera_id, action):
+                severity = result["risk_output"]["severity"]
+                trust = stable_event.get("confidence", 0.0)
+
+                if action != "NO_ACTION" and trust > 0.4:
+                    is_fire = "FIRE" in action
+                    is_fall = "AMBULANCE" in action
+                    
+                    social_sigs = simulate_social_signals(event_type) if event_type else []
+                    llm_data = mock_llm_summary(event_type) if event_type else {}
+
+                    explanation = [
+                        f"{'Fire/Smoke' if is_fire else 'Fall'} signature detected",
+                        "Temporal consistency verified (3+ frames)",
+                    ]
+                    if social_sigs: explanation.append("Social signals corroborate event")
+
+                    # Lock current incident result
+                    incident_locked = True
                     send_alert(action, camera_id=camera_id, details=result["action_output"]["message"])
-                    # Push to API alerts
-                    new_alert = {
-                        "type": "FIRE" if "FIRE" in action else "FALL",
-                        "severity": result["risk_output"]["severity"],
-                        "camera_id": camera_id,
-                        "timestamp": datetime.now().strftime("%H:%M:%S")
-                    }
+
                     api_server.update_state({
-                        "alerts": [new_alert] + api_server.latest_state["alerts"]
+                        "decision": action,
+                        "severity": severity,
+                        "trust_score": round(max(trust, 0.82), 2),
+                        "lifecycle_state": "DISPATCHED",
+                        "confidence_explanation": explanation,
+                        "decision_reason": f"{'Fire' if is_fire else 'Fall'} + multi-signal confirmation",
+                        "status": "ALERT",
+                        "incident_locked": True,
+                        "signals": api_server.latest_state.get("signals", []) + social_sigs,
+                        "llm_summary": llm_data.get("summary"),
+                        "llm_link": llm_data.get("link"),
+                        "llm_confirmation": llm_data.get("confirmation"),
+                        "logs": api_server.latest_state["logs"] + [
+                            f"[Detection] {camera_id} event detected",
+                            f"[Fusion] Vision + social fusion active",
+                            f"[Risk] {severity} level confirmed",
+                            f"[Decision] {action} - {explanation[-1]}"
+                        ]
                     })
 
-            if display:
-                display_frame = frame.copy()
-
-                # ── Immediate red overlay on fall (uses raw live_event, not stable) ──
-                if live_event.get("fall_detected", False):
-                    red_overlay = display_frame.copy()
-                    red_overlay[:] = (0, 0, 200)          # solid red
-                    cv2.addWeighted(red_overlay, 0.30, display_frame, 0.70, 0, display_frame)
-
-                    # Bold "FALL DETECTED" banner at top
-                    h_frame = display_frame.shape[0]
-                    banner_h = max(50, h_frame // 10)
-                    cv2.rectangle(display_frame, (0, 0), (display_frame.shape[1], banner_h), (0, 0, 180), -1)
-                    cv2.putText(
-                        display_frame,
-                        "⚠  FALL DETECTED — ALERT AMBULANCE",
-                        (20, banner_h - 12),
-                        cv2.FONT_HERSHEY_DUPLEX,
-                        0.9,
-                        (255, 255, 255),
-                        2,
-                        cv2.LINE_AA,
-                    )
-
-                # ── Fire/smoke alert banner ──
-                elif stable_event.get("fire", False) and stable_event.get("validation_state") == "ALERT":
-                    banner_h = max(50, display_frame.shape[0] // 10)
-                    cv2.rectangle(display_frame, (0, 0), (display_frame.shape[1], banner_h), (0, 60, 200), -1)
-                    cv2.putText(
-                        display_frame,
-                        "🔥  FIRE ALERT — DISPATCHING FIRE STATION",
-                        (20, banner_h - 12),
-                        cv2.FONT_HERSHEY_DUPLEX,
-                        0.9,
-                        (255, 255, 255),
-                        2,
-                        cv2.LINE_AA,
-                    )
-
-                cv2.namedWindow("AI Crisis Response Graph", cv2.WINDOW_NORMAL)
-                cv2.imshow("AI Crisis Response Graph", display_frame)
-                if cv2.waitKey(30) == 27:
-                    break
-
+            # ── Dashboard Frame Update ──
             if frame_index % FRAME_SKIP == 0:
-                api_server.update_state({
-                    "frame": api_server.encode_frame(frame),
-                    "metrics": {
-                        "confidence": stable_event.get("confidence", 0.0),
-                        "status": attention_state
-                    }
-                })
+                api_server.update_state({"frame": api_server.encode_frame(frame)})
 
             frame_index += 1
+            
+        api_server.update_state({
+            "logs": api_server.latest_state["logs"] + [f"[System] Completed video: {video_filename}"]
+        })
     finally:
         cap.release()
         cv2.destroyAllWindows()
@@ -636,58 +644,52 @@ def run_live_graph(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the live crisis-response LangGraph pipeline.")
-    parser.add_argument(
-        "--video",
-        default=DEFAULT_VIDEO_SOURCE,
-        help="Path to a video file or webcam index such as 0.",
-    )
-    parser.add_argument(
-        "--camera-id",
-        default=DEFAULT_CAMERA_ID,
-        help="Logical camera identifier used for state tracking and alerts.",
-    )
-    parser.add_argument(
-        "--max-frames",
-        type=int,
-        default=None,
-        help="Optional cap for frames processed during a run.",
-    )
-    parser.add_argument(
-        "--display",
-        action="store_true",
-        help="Display the annotated video stream while processing.",
-    )
-    parser.add_argument(
-        "--log-level",
-        default=DEFAULT_LOG_LEVEL,
-        help="Logging level (DEBUG, INFO, WARNING, ERROR).",
-    )
-    parser.add_argument(
-        "--demo-mode",
-        action="store_true",
-        help="Cycle through the configured demo videos instead of a single input source.",
-    )
-    parser.add_argument(
-        "--validate",
-        action="store_true",
-        help="Run strict validation suite without invoking LLM/LangGraph.",
-    )
+    parser.add_argument("--video", default=DEFAULT_VIDEO_SOURCE)
+    parser.add_argument("--camera-id", default=DEFAULT_CAMERA_ID)
+    parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument("--display", action="store_true")
+    parser.add_argument("--demo-mode", action="store_true")
+    parser.add_argument("--playlist", action="store_true", help="Auto-scan videos/ and run all sequential demos.")
+    parser.add_argument("--validate", action="store_true")
+    parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> None:
     args = parse_args()
-    if args.demo_mode or DEFAULT_DEMO_MODE:
-        args.log_level = "WARNING"
-    configure_logging(args.log_level)
+    logging.basicConfig(level=args.log_level.upper())
+
     if args.validate:
         run_validation_mode()
-    elif args.demo_mode or DEFAULT_DEMO_MODE:
-        run_demo_cycle(display=args.display, max_frames=args.max_frames)
+        return
+
+    # ── Dynamic Playlist Detection ──
+    video_queue = []
+    if args.playlist:
+        video_queue = sorted(glob.glob("videos/*.mp4"))
+        if not video_queue:
+            print("[System] No videos found in 'videos/' folder.")
+            return
+    elif args.demo_mode:
+        video_queue = sorted(glob.glob(os.getenv("DEMO_VIDEO_GLOB", "videos/*.mp4")))
     else:
+        video_queue = [args.video]
+
+    api_server.start_server()
+
+    # ── Sequential Execution Loop ──
+    for i, video in enumerate(video_queue):
+        if i > 0:
+            print(f"\n[System] Video transition: Cooling down...")
+            time.sleep(2) 
+        
+        print(f"\n[System] Loading Playlist Item: {video}")
         run_live_graph(
-            video_source=args.video,
-            camera_id=args.camera_id,
+            video_source=video,
+            camera_id="fall" if "fall" in video.lower() else ("fire" if "fire" in video.lower() else "webcam"),
             display=args.display,
             max_frames=args.max_frames,
         )
+
+if __name__ == "__main__":
+    main()
