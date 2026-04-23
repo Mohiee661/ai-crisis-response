@@ -580,6 +580,15 @@ def run_live_graph(
             if api_server.latest_state["incident_locked"] and not incident_locked:
                 incident_locked = True 
 
+            # ── Social Signal Fusion (Operator Simulation) ──
+            ext_signals = api_server.pop_simulated_signals()
+            if ext_signals:
+                api_server.update_state({
+                    "signals": api_server.latest_state.get("signals", []) + ext_signals,
+                    "logs": api_server.latest_state["logs"] + [f"[Social] Operator: {s['text']}" for s in ext_signals],
+                    "lifecycle_state": "CONFIRMED" if api_server.latest_state["lifecycle_state"] == "DETECTED" else api_server.latest_state["lifecycle_state"]
+                })
+
             # ── Pipeline Execution ──
             if not incident_locked and attention_state != "SAFE":
                 if api_server.latest_state["lifecycle_state"] == "MONITORING":
